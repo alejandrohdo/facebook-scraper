@@ -5,11 +5,12 @@ import logging
 import pathlib
 import sys
 import warnings
+import pickle
 from typing import Any, Dict, Iterator, Optional, Set, Union
 
 from requests.cookies import cookiejar_from_dict
 
-from .constants import DEFAULT_REQUESTS_TIMEOUT
+from .constants import DEFAULT_REQUESTS_TIMEOUT, DEFAULT_COOKIES_FILE_PATH
 from .facebook_scraper import FacebookScraper
 from .fb_types import Credentials, Post, RawPost, Profile
 from .utils import html_element_to_string, parse_cookie_file
@@ -18,6 +19,7 @@ import traceback
 import time
 from datetime import datetime, timedelta
 import re
+import os
 
 
 _scraper = FacebookScraper()
@@ -56,8 +58,8 @@ def unset_cookies():
     _scraper.session.cookies = cookiejar_from_dict({})
 
 
-def set_proxy(proxy):
-    _scraper.set_proxy(proxy)
+def set_proxy(proxy, verify=True):
+    _scraper.set_proxy(proxy, verify)
 
 
 def set_user_agent(user_agent):
@@ -82,6 +84,22 @@ def get_profile(
     cookies = kwargs.pop('cookies', None)
     set_cookies(cookies)
     return _scraper.get_profile(account, **kwargs)
+
+
+def get_reactors(
+    post_id: Union[str, int],
+    **kwargs,
+) -> Iterator[dict]:
+    """Get reactors for a given post ID
+    Args:
+        post_id(str): The post ID, as returned from get_posts
+        cookies (Union[dict, CookieJar, str]): Cookie jar to use.
+            Can also be a filename to load the cookies from a file (Netscape format).
+    """
+    _scraper.requests_kwargs['timeout'] = kwargs.pop('timeout', DEFAULT_REQUESTS_TIMEOUT)
+    cookies = kwargs.pop('cookies', None)
+    set_cookies(cookies)
+    return _scraper.get_reactors(post_id, **kwargs)
 
 
 def get_friends(
@@ -282,11 +300,9 @@ def get_posts_by_search(
     credentials: Optional[Credentials] = None,
     **kwargs,
 ) -> Iterator[Post]:
-
-    """Get posts from a Facebook page or group.
+    """Get posts by searching all of Facebook
     Args:
         word (str): The word for searching posts.
-        group (int): The group id.
         credentials (Optional[Tuple[str, str]]): Tuple of email and password to login before scraping.
         timeout (int): Timeout for requests.
         page_limit (int): How many pages of posts to go through.
@@ -387,6 +403,9 @@ def write_posts_to_csv(
     if encoding is None:
         encoding = locale.getpreferredencoding()
 
+    if os.path.isfile(filename):
+        raise FileExistsError(f"{filename} exists")
+
     if filename == "-":
         output_file = sys.stdout
     else:
@@ -478,12 +497,60 @@ def write_posts_to_csv(
     output_file.close()
 
 
+def get_groups_by_search(
+    word: str,
+    **kwargs,
+):
+    """Searches Facebook groups and yields ids for each result
+    on the first page"""
+    _scraper.requests_kwargs['timeout'] = kwargs.pop('timeout', DEFAULT_REQUESTS_TIMEOUT)
+    cookies = kwargs.pop('cookies', None)
+    set_cookies(cookies)
+    return _scraper.get_groups_by_search(word, **kwargs)
+
+
 def enable_logging(level=logging.DEBUG):
     handler = logging.StreamHandler()
     handler.setLevel(level)
 
     logger.addHandler(handler)
     logger.setLevel(level)
+
+
+def use_persistent_session(email: str, password: str, cookies_file_path=DEFAULT_COOKIES_FILE_PATH):
+    """Login persistently to Facebook and save cookies to a file (default: ".fb-cookies.pckl"). This is highly recommended if you want to scrape several times a day because it will keep your session alive instead of logging in every time (which can be flagged as suspicious by Facebook).
+
+    Args:
+        email (str): email address to login.
+        password (str): password to login.
+        cookies_file_path (str, optional): path to the file in which to save cookies. Defaults to ".fb-cookies.pckl".
+
+    Raises:
+        exceptions.InvalidCredentials: if the credentials are invalid.
+
+    Returns:
+        Boolean: True if the login was successful, False otherwise.
+    """
+    try:
+        with open(cookies_file_path, "rb") as f:
+            cookies = pickle.load(f)
+        logger.debug("Loaded cookies from %s", cookies_file_path)
+    except FileNotFoundError:
+        logger.error("No cookies file found at %s", cookies_file_path)
+        cookies = None
+    try:
+        if not cookies:
+            raise exceptions.InvalidCookies()
+        set_cookies(cookies)
+        logger.debug("Successfully logged in with cookies")
+    except exceptions.InvalidCookies:
+        logger.exception("Invalid cookies, trying to login with credentials")
+        _scraper.login(email, password)
+        cookies = _scraper.session.cookies
+        with open(cookies_file_path, "wb") as f:
+            pickle.dump(cookies, f)
+        set_cookies(cookies)
+        logger.debug("Successfully logged in with credentials")
 
 
 # Disable logging by default
